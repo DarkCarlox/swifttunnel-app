@@ -135,6 +135,9 @@ pub fn boost_get_system_memory() -> Result<SystemMemorySnapshotResponse, String>
     }
 }
 
+/// Applies the current boost config to the system.
+/// Called only when the user explicitly changes a boost toggle.
+/// Should NOT be called automatically on app startup or tab mount.
 fn reconcile_boosts(state: &AppState, config: &swifttunnel_core::structs::Config) -> Vec<String> {
     let mut warnings = Vec::new();
     // Resolve Roblox PID from performance monitor (needed for process-specific boosts)
@@ -176,6 +179,14 @@ fn reconcile_boosts(state: &AppState, config: &swifttunnel_core::structs::Config
     warnings
 }
 
+/// Save a new boost config and apply it immediately to the system.
+///
+/// FIX #2: This command must only be called when the user explicitly changes a boost
+/// toggle in the UI. It must NOT be invoked automatically on app startup, tab mount,
+/// or config load — doing so causes registry writes before any user action.
+///
+/// Frontend contract: call this ONLY from toggle onChange handlers, never from
+/// useEffect/onMount hooks that fire when the Boost tab is first rendered.
 #[tauri::command]
 pub fn boost_update_config(state: State<'_, AppState>, config_json: String) -> Result<(), String> {
     let config: swifttunnel_core::structs::Config =

@@ -13,6 +13,7 @@ use std::fs;
 use std::path::PathBuf;
 
 const SETTINGS_FILE: &str = "settings.json";
+const REGISTRY_SNAPSHOT_FILE: &str = "registry_snapshot.json";
 const APP_NAME: &str = "SwiftTunnel";
 pub const MIN_WINDOW_WIDTH: f32 = 800.0;
 pub const MIN_WINDOW_HEIGHT: f32 = 600.0;
@@ -166,19 +167,6 @@ pub struct AppSettings {
     /// All options are opt-in and default OFF.
     #[serde(default)]
     pub game_process_performance: GameProcessPerformanceSettings,
-
-    /// Route Roblox HTTPS through a local proxy to bypass restrictive networks.
-    ///
-    /// When enabled, Roblox domains are redirected to a local TCP relay that
-    /// resolves DNS via DoH and forwards traffic to the real servers.
-    #[serde(default)]
-    pub roblox_network_bypass: bool,
-
-    /// Fragment the TLS ClientHello to evade SNI-based deep packet inspection.
-    ///
-    /// Only effective when `roblox_network_bypass` is also enabled.
-    #[serde(default)]
-    pub roblox_network_bypass_sni_fragment: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -268,8 +256,6 @@ impl Default for AppSettings {
             preferred_physical_adapter_guid: None,
             adapter_binding_mode: AdapterBindingMode::SmartAuto,
             game_process_performance: GameProcessPerformanceSettings::default(),
-            roblox_network_bypass: false,
-            roblox_network_bypass_sni_fragment: false,
         }
     }
 }
@@ -287,6 +273,92 @@ impl AppSettings {
 fn sanitize_settings(mut settings: AppSettings) -> AppSettings {
     settings.sanitize_in_place();
     settings
+}
+
+/// Snapshot of original Windows registry values captured before SwiftTunnel modifies them.
+///
+/// Persisted to disk so that restore works correctly even after an unclean shutdown.
+/// Without this, NetworkBooster would snapshot the already-modified values on the next
+/// launch and "restore" would write the boosted values back instead of the true originals.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RegistrySnapshot {
+    /// Per-adapter Nagle values captured before modification.
+    /// Key: adapter GUID string, Value: (TcpAckFrequency, TCPNoDelay)
+    /// None means the key was not present in the registry (will be deleted on restore).
+    #[serde(default)]
+    pub nagle_per_adapter: HashMap<String, (Option<u32>, Option<u32>)>,
+    /// NetworkThrottlingIndex before modification (None = key was absent).
+    #[serde(default)]
+    pub network_throttling_index: Option<u32>,
+    /// SystemResponsiveness before modification (None = key was absent).
+    #[serde(default)]
+    pub system_responsiveness: Option<u32>,
+    /// Set to true once the baseline has been captured and persisted.
+    /// Prevents overwriting the true original with already-boosted values on re-launch.
+    #[serde(default)]
+    pub baseline_captured: bool,
+}
+
+fn get_registry_snapshot_path() -> Option<PathBuf> {
+    get_settings_dir().map(|p| p.join(REGISTRY_SNAPSHOT_FILE))
+}
+
+/// Load the persisted registry snapshot from disk.
+/// Returns a default (empty) snapshot if the file does not exist yet.
+pub fn load_registry_snapshot() -> RegistrySnapshot {
+    let path = match get_registry_snapshot_path() {
+        Some(p) => p,
+        None => return RegistrySnapshot::default(),
+    };
+
+    if !path.exists() {
+        return RegistrySnapshot::default();
+    }
+
+    match fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
+        Err(e) => {
+            error!("Failed to read registry snapshot: {}", e);
+            RegistrySnapshot::default()
+        }
+    }
+}
+
+/// Persist the registry snapshot to disk.
+/// Called once the baseline is captured so it survives unclean shutdowns.
+pub fn save_registry_snapshot(snapshot: &RegistrySnapshot) {
+    let dir = match get_settings_dir() {
+        Some(d) => d,
+        None => return,
+    };
+
+    if !dir.exists() {
+        if let Err(e) = fs::create_dir_all(&dir) {
+            error!("Failed to create settings dir for snapshot: {}", e);
+            return;
+        }
+    }
+
+    let path = dir.join(REGISTRY_SNAPSHOT_FILE);
+    match serde_json::to_string_pretty(snapshot) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&path, json) {
+                error!("Failed to write registry snapshot: {}", e);
+            } else {
+                debug!("Registry snapshot saved to {:?}", path);
+            }
+        }
+        Err(e) => error!("Failed to serialize registry snapshot: {}", e),
+    }
+}
+
+/// Delete the persisted registry snapshot from disk.
+/// Should be called after a successful full restore to prevent stale data.
+pub fn clear_registry_snapshot() {
+    if let Some(path) = get_registry_snapshot_path() {
+        let _ = fs::remove_file(&path);
+        debug!("Registry snapshot cleared");
+    }
 }
 
 /// Get the settings directory path
